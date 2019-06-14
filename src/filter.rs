@@ -137,16 +137,20 @@ impl<D: Eq + Hash + Send + Sync + Debug + Clone> CountFilterEqClass<D> {
     }
 }
 
-impl<D: Eq + Ord + Hash + Send + Sync + Debug + Clone> KmerSummarizer<D, EqClassIdType> for CountFilterEqClass<D> {
-    fn summarize<K, F: Iterator<Item = (K, Exts, D)>>(&self, items: F) -> (bool, Exts, EqClassIdType) {
+impl<D: Eq + Ord + Hash + Send + Sync + Debug + Clone> KmerSummarizer<D, (EqClassIdType, u8)> for CountFilterEqClass<D> {
+    fn summarize<K, F: Iterator<Item = (K, Exts, D)>>(&self, items: F) -> (bool, Exts, (EqClassIdType, u8)) {
         let mut all_exts = Exts::empty();
         let mut out_data = Vec::new();
 
         let mut nobs = 0;
+        let mut sentinal_flag: u8 = 0;
         for (_, exts, d) in items {
             out_data.push(d);
             all_exts = all_exts.add(exts);
             nobs += 1;
+
+            if exts.num_exts_l() == 0 { sentinal_flag += 1; }
+            if exts.num_exts_r() == 0 { sentinal_flag += 2; }
         }
 
         out_data.sort();  out_data.dedup();
@@ -160,7 +164,7 @@ impl<D: Eq + Ord + Hash + Send + Sync + Debug + Clone> KmerSummarizer<D, EqClass
             },
         };
 
-        (nobs as usize >= self.min_kmer_obs, all_exts, eq_id)
+        (nobs as usize >= self.min_kmer_obs, all_exts, (eq_id, sentinal_flag))
     }
 }
 

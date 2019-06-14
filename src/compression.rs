@@ -14,13 +14,13 @@ use boomphf::hashmap::BoomHashMap2;
 use crate::graph::{DebruijnGraph, BaseGraph};
 use crate::dna_string::DnaString;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 enum ExtMode<K: Kmer> {
     Unique(K, Dir, Exts),
     Terminal(Exts),
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 enum ExtModeNode {
     Unique(usize, Dir, Exts),
     Terminal(Exts),
@@ -77,20 +77,64 @@ impl<D> ScmapCompress<D> {
     }
 }
 
-impl<D: PartialEq> CompressionSpec<D> for ScmapCompress<D>
-where D: Debug
+//impl<D: PartialEq> CompressionSpec<D> for ScmapCompress<D>
+//where D: Debug
+//{
+//    fn reduce(&self, d: D, other: &D) -> D {
+//        if d != *other {
+//            panic!("{:?} != {:?}, Should not happen", d, *other);
+//        }
+//        d
+//    }
+//
+//    fn join_test(&self, d1: &D, d2: &D) -> bool {
+//        if d1 == d2 { true } else { false }
+//    }
+//}
+
+impl CompressionSpec<(u32, u8)> for ScmapCompress<(u32, u8)>
 {
-    fn reduce(&self, d: D, other: &D) -> D {
-        if d != *other {
+    fn reduce(&self, d: (u32, u8), other: &(u32, u8)) -> (u32, u8) {
+        if d.0 != (*other).0 {
             panic!("{:?} != {:?}, Should not happen", d, *other);
         }
-        d
+
+        let other_d_1 = (*other).1;
+        match d.1 {
+            0 => match other_d_1 {
+                0 | 2 => return *other,
+                _ => unreachable!(),
+            },
+            1 => match other_d_1 {
+                0 => return d,
+                //1 => return *other,
+                2 => return (d.0, 3),
+                _ => unreachable!(),
+            },
+            //2 => match other_d_1 {
+                //0 => return d,
+                //2 => return *other,
+                //_ => return (d.0, 3),
+            //}
+            //3 => match other_d_1 {
+            //    0 => return d,
+            //    _ => unreachable!(),
+            //}
+            _ => unreachable!("{:?}, {:?}", d, other),
+        }
     }
 
-    fn join_test(&self, d1: &D, d2: &D) -> bool {
-        if d1 == d2 { true } else { false }
+    fn join_test(&self, d1: &(u32, u8), d2: &(u32, u8)) -> bool {
+        if d1.0 == d2.0 {
+            if (d1.1 == 0 || d1.1 == 1) && (d2.1 == 0 || d2.1 == 2) {
+                return true
+            }
+        }
+
+        false
     }
 }
+
 
 struct CompressFromGraph<'a, K: 'a + Kmer, D: 'a + PartialEq, S: CompressionSpec<D>> {
     stranded: bool,
@@ -105,6 +149,7 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
     #[inline(never)]
     fn try_extend_node(&mut self, node: usize, dir: Dir) -> ExtModeNode {
 
+        let debug = false;
         let node = self.graph.get_node(node);
         let bases = node.sequence();
         let exts = node.exts();
@@ -113,6 +158,7 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
             (!self.stranded && node.len() == K::k() &&
                 bases.get_kmer::<K>(0).is_palindrome())
         {
+            if debug  {println!("This fail");}
             ExtModeNode::Terminal(exts.single_dir(dir))
         } else {
             // Get the next kmer
@@ -163,14 +209,28 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
             // c) the new edge is not of length K and a palindrome
             // d) the color of the current and next node is same
 
+            let sentinal_test = match dir {
+                Dir::Left => !self.spec.join_test(next_node.data(), node.data()),
+                Dir::Right => !self.spec.join_test(node.data(), next_node.data()),
+            };
+            if debug {
+                println!("Graph: {:?} {:?} {:?}, {:?}, {:?}, {:?}",
+                         end_kmer, node.data(), next_kmer, next_node.data(),
+                         dir, !sentinal_test);
+            }
+
             if !self.available_nodes.contains(next_node_id) ||
                 (!self.stranded && next_kmer.is_palindrome()) ||
-                !self.spec.join_test(node.data(), next_node.data())
+                sentinal_test
             {
                 // Next kmer isn't in this partition,
                 // or we've already used it,
                 // or it's palindrom and we are not stranded
                 // or the colors were not same
+                if debug {
+                    if sentinal_test { println!("sentinel fail"); }
+                    if !self.available_nodes.contains(next_node_id) { println!("Next node covered"); }
+                }
                 return ExtModeNode::Terminal(exts.single_dir(dir));
             }
 
@@ -192,6 +252,7 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
             } else {
                 // there's more than one path
                 // into the target kmer - don't include it
+                if debug { println!("multimap fail"); }
                 ExtModeNode::Terminal(exts.single_dir(dir))
             }
         }
@@ -209,7 +270,6 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
 
         loop {
             let ext_result = self.try_extend_node(current_node, current_dir);
-
             match ext_result {
                 ExtModeNode::Unique(next_node, next_dir_outgoing, _) => {
                     let next_dir_incoming = next_dir_outgoing.flip();
@@ -234,7 +294,9 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
     #[inline(never)]
     fn build_node(&mut self, seed_node: usize) -> (DnaString, Exts, VecDeque<(usize, Dir)>, D) {
 
+        //println!("Left");
         let (l_path, l_ext) = self.extend_node(seed_node, Dir::Left);
+        //println!("Right");
         let (r_path, r_ext) = self.extend_node(seed_node, Dir::Right);
 
         // Stick together edge chunks to get full edge sequence
@@ -243,22 +305,43 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
         let mut node_data: D = self.graph.get_node(seed_node).data().clone();
         node_path.push_back((seed_node, Dir::Left));
 
+        //println!("LPATH: {:?}", l_path);
+        let mut dir_hist = Dir::Left;
         // Add on the left path
         for &(next_node, incoming_dir) in l_path.iter() {
             node_path.push_front((next_node, incoming_dir.flip()));
-            node_data = self.spec.reduce(
-                node_data,
-                self.graph.get_node(next_node).data(),
-            );
+            node_data = match dir_hist {
+                Dir::Right => { self.spec.reduce(
+                    node_data,
+                    self.graph.get_node(next_node).data(),
+                )},
+                Dir::Left => { self.spec.reduce(
+                    self.graph.get_node(next_node).data().clone(),
+                    &node_data,
+                )},
+            };
+            dir_hist = incoming_dir.flip();
         }
 
+        //println!("RPATH: {:?}", r_path);
+        dir_hist = Dir::Right;
+        node_data = self.graph.get_node(seed_node).data().clone();
         // Add on the right path
         for &(next_node, incoming_dir) in r_path.iter() {
+
+            //println!("{:?}", self.graph.get_node(next_node));
             node_path.push_back((next_node, incoming_dir));
-            node_data = self.spec.reduce(
-                node_data,
-                self.graph.get_node(next_node).data(),
-            );
+            node_data = match dir_hist {
+                Dir::Right => { self.spec.reduce(
+                    node_data,
+                    self.graph.get_node(next_node).data(),
+                )},
+                Dir::Left => { self.spec.reduce(
+                    self.graph.get_node(next_node).data().clone(),
+                    &node_data,
+                )},
+            };
+            dir_hist = incoming_dir.flip();
         }
 
         let left_extend = match l_path.last() {
@@ -399,8 +482,9 @@ impl<'a, K: Kmer, D: Clone + Debug, S: CompressionSpec<D>> CompressFromHash<'a, 
                 do_flip = flip_rc.1;
                 next_kmer = flip_rc.0;
             }
-
+            //println!("{:?} {:?}, {:?}, {:?}", do_flip, kmer, next_kmer, dir);
             let next_dir = dir.cond_flip(do_flip);
+            //println!("{:?} {:?}, {:?}, {:?}", do_flip, kmer, next_kmer, next_dir);
             let is_palindrome = !self.stranded && next_kmer.is_palindrome();
 
 
@@ -425,7 +509,12 @@ impl<'a, K: Kmer, D: Clone + Debug, S: CompressionSpec<D>> CompressFromHash<'a, 
             let outgoing_exts = next_kmer_exts.single_dir(new_incoming_dir.flip());
 
             // Test if the spec let's us combine these into the same path
-            let can_join = self.spec.join_test(kmer_data, next_kmer_data);
+            let can_join = match dir {
+                Dir::Left => self.spec.join_test(next_kmer_data, kmer_data),
+                Dir::Right => self.spec.join_test(kmer_data, next_kmer_data),
+            };
+            //println!("Hash {:?}{:?}, {:?}{:?}, {:?}, {:?}", kmer, kmer_data,
+            //         next_kmer, next_kmer_data, dir, can_join);
 
             if incoming_count == 0 && !is_palindrome {
                 println!("{:?}, {:?}, {:?}", kmer, exts, kmer_data);
@@ -499,6 +588,8 @@ impl<'a, K: Kmer, D: Clone + Debug, S: CompressionSpec<D>> CompressFromHash<'a, 
 
         let l_ext = self.extend_kmer(seed, Dir::Left, path);
 
+        let mut dir_hist = Dir::Left;
+        println!("LPATH: {:?} {:?}", seed, path);
         // Add on the left path
         for &(next_kmer, dir) in path.iter() {
             let kmer = match dir {
@@ -510,7 +601,14 @@ impl<'a, K: Kmer, D: Clone + Debug, S: CompressionSpec<D>> CompressFromHash<'a, 
 
             // Reduce the data object
             let (_, ref kmer_data) = self.get_kmer_data(&next_kmer);
-            node_data = self.spec.reduce(node_data, kmer_data)
+            println!("HERE Left {:?} {:?} {:?} {:?} {:?}", seed, node_data, kmer, kmer_data, dir_hist);
+            node_data = match dir_hist {
+                Dir::Right => self.spec.reduce(node_data,
+                                               kmer_data),
+                Dir::Left => self.spec.reduce((*kmer_data).clone(),
+                                              &node_data),
+            };
+            dir_hist = dir;
         }
 
         let left_extend = match path.last() {
@@ -521,6 +619,9 @@ impl<'a, K: Kmer, D: Clone + Debug, S: CompressionSpec<D>> CompressFromHash<'a, 
 
         let r_ext = self.extend_kmer(seed, Dir::Right, path);
 
+        dir_hist = Dir::Right;
+        node_data = self.get_kmer_data(&seed).1.clone();
+        println!("RPATH: {:?} {:?}", seed, path);
         // Add on the right path
         for &(next_kmer, dir) in path.iter() {
             let kmer = match dir {
@@ -531,7 +632,14 @@ impl<'a, K: Kmer, D: Clone + Debug, S: CompressionSpec<D>> CompressFromHash<'a, 
             edge_seq.push_back(kmer.get(K::k() - 1));
 
             let (_, ref kmer_data) = self.get_kmer_data(&next_kmer);
-            node_data = self.spec.reduce(node_data, kmer_data)
+            println!("HERE Right {:?} {:?} {:?} {:?} {:?}", seed, node_data, kmer, kmer_data, dir_hist);
+            node_data = match dir_hist {
+                Dir::Right => self.spec.reduce(node_data,
+                                               kmer_data),
+                Dir::Left => self.spec.reduce((*kmer_data).clone(),
+                                              &node_data),
+            };
+            dir_hist = dir;
         }
 
         let right_extend = match path.last() {
@@ -582,7 +690,6 @@ impl<'a, K: Kmer, D: Clone + Debug, S: CompressionSpec<D>> CompressFromHash<'a, 
                 graph.add(&edge_seq_buf, node_exts, node_data);
             }
         }
-
         graph
     }
 }

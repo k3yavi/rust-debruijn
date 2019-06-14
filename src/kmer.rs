@@ -62,6 +62,9 @@ pub type Kmer40 = VarIntKmer<u128, K40>;
 pub type Kmer32 = IntKmer<u64>;
 
 /// 30-base kmer, backed by a single u64
+pub type Kmer31 = VarIntKmer<u64, K31>;
+
+/// 30-base kmer, backed by a single u64
 pub type Kmer30 = VarIntKmer<u64, K30>;
 
 /// 24-base kmer, backed by a single u64
