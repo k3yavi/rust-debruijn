@@ -211,6 +211,7 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
 
             let next_node = self.graph.get_node(next_node_id);
             let next_exts = next_node.exts();
+            if DEBUG {println!("{:?}", next_exts);}
             let next_data = next_node.data().clone();
             //let next_data = match rc {
             //    false => ,
@@ -715,13 +716,6 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
 
             // Reduce the data object
             let (_, ref kmer_data) = self.get_kmer_data(&next_kmer);
-            //let kmer_cond_flip_data = match dir {
-            //    Dir::Left => (*kmer_data).clone(),
-            //    Dir::Right => self.spec.flip((*kmer_data).clone()),
-            //};
-
-            if DEBUG {println!("HERE Left {:?} {:?} {:?} {:?} {:?}", seed, node_data,
-                               kmer, kmer_data, dir_hist);}
 
             {
                 let next_data = match dir {
@@ -737,10 +731,14 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
                         &next_data,
                     ),
                     Dir::Left => self.spec.reduce(
-                        next_data,
+                        next_data.clone(),
                         &node_data,
                     ),
                 };
+
+                if DEBUG {println!("HERE Left {:?} {:?} {:?}{:?} Orig:{:?} {:?}",
+                                   seed, node_data, kmer, next_data,
+                                   (*kmer_data).clone(), dir_hist);}
             }
 
             dir_hist = dir;
@@ -768,13 +766,6 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
             edge_seq.push_back(kmer.get(K::k() - 1));
 
             let (_, ref kmer_data) = self.get_kmer_data(&next_kmer);
-            //let kmer_cond_flip_data = match dir {
-            //    Dir::Right => (*kmer_data).clone(),
-            //    Dir::Left => self.spec.flip((*kmer_data).clone()),
-            //};
-
-            if DEBUG {println!("HERE Right {:?} {:?} {:?} {:?} {:?}",
-                               seed, node_data, kmer, kmer_data, dir_hist);}
 
             {
                 let next_data = match dir {
@@ -790,11 +781,16 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
                         &next_data,
                     ),
                     Dir::Left => self.spec.reduce(
-                        next_data,
+                        next_data.clone(),
                         &node_data,
                     ),
                 };
+
+                if DEBUG {println!("HERE Right {:?} {:?} {:?}{:?} Orig:{:?} {:?}",
+                                   seed, node_data, kmer, next_data,
+                                   (*kmer_data).clone(), dir_hist);}
             }
+
 
             dir_hist = dir;
         }
@@ -805,6 +801,7 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
             Some(&(_, Dir::Right)) => r_ext,
         };
 
+        if DEBUG { println!("Found Ldata: {:?}; Rdata: {:?}", l_node_data, node_data); }
         node_data = self.spec.bidirectional_join_test(l_node_data, &node_data);
         (Exts::from_single_dirs(left_extend, right_extend), node_data)
     }
@@ -845,6 +842,8 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
             if comp.available_kmers.contains(kmer_counter) {
                 let (node_exts, node_data) =
                     comp.build_node(kmer_counter, &mut path_buf, &mut edge_seq_buf);
+                if DEBUG { println!("ADDED: {:?} {:?} {:?}", &edge_seq_buf, node_exts,
+                                                    node_data) }
                 graph.add(&edge_seq_buf, node_exts, node_data);
             }
         }
