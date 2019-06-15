@@ -386,8 +386,10 @@ impl DnaString {
 
     /// Get slice containing the interval [`start`, `end`) of `self`
     pub fn slice(&self, start: usize, end: usize) -> DnaStringSlice<'_> {
-        assert!(start <= self.len, "coordinate exceeds number of elements.");
-        assert!(end <= self.len, "coordinate exceeds number of elements.");
+        assert!(start <= self.len, "coordinate start {}/{} exceeds number of elements.",
+                start, self.len);
+        assert!(end <= self.len, "coordinate end {}/{} exceeds number of elements.",
+                end, self.len);
 
         DnaStringSlice {
             dna_string: self,
@@ -579,8 +581,10 @@ impl<'a> DnaStringSlice<'a> {
     }
         /// Get slice containing the interval [`start`, `end`) of `self`
     pub fn slice(&self, start: usize, end: usize) -> DnaStringSlice<'_> {
-        assert!(start <= self.length, "coordinate exceeds number of elements.");
-        assert!(end <= self.length, "coordinate exceeds number of elements.");
+        assert!(start <= self.length, "coordinate start {}/{} exceeds number of elements.",
+                start, self.length);
+        assert!(end <= self.length, "coordinate end {}/{} exceeds number of elements.",
+                end, self.length);
 
         DnaStringSlice {
             dna_string: self.dna_string,
