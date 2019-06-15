@@ -513,7 +513,7 @@ impl<'a> Vmer for DnaSlice<'a> {
 
 
 /// Direction of motion in a DeBruijn graph
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum Dir {
     Left,
     Right,

@@ -30,7 +30,7 @@ pub trait KmerSummarizer<DI, DO> {
     /// * whether this kmer passes the filtering criteria (e.g. is there a sufficient number of observation)
     /// * the accumulated Exts of the kmer
     /// * a summary data object of type `DO` that will be used as a color annotation in the DeBruijn graph.
-    fn summarize<K, F: Iterator<Item = (K, Exts, DI)>>(&self, items: F) -> (bool, Exts, DO);
+    fn summarize<K, F: Iterator<Item = (K, Exts, DI, u8)>>(&self, items: F) -> (bool, Exts, DO);
 }
 
 /// A simple KmerSummarizer that only accepts kmers that are observed
@@ -49,10 +49,10 @@ impl CountFilter {
 }
 
 impl<D> KmerSummarizer<D, u16> for CountFilter {
-    fn summarize<K, F: Iterator<Item = (K, Exts, D)>>(&self, items: F) -> (bool, Exts, u16) {
+    fn summarize<K, F: Iterator<Item = (K, Exts, D, u8)>>(&self, items: F) -> (bool, Exts, u16) {
         let mut all_exts = Exts::empty();
         let mut count = 0u16;
-        for (_, exts, _) in items {
+        for (_, exts, _, _) in items {
             count = count.saturating_add(1);
             all_exts = all_exts.add(exts);
         }
@@ -82,13 +82,13 @@ impl<D> CountFilterSet<D> {
 
 
 impl<D: Ord> KmerSummarizer<D, Vec<D>> for CountFilterSet<D> {
-    fn summarize<K, F: Iterator<Item = (K, Exts, D)>>(&self, items: F) -> (bool, Exts, Vec<D>) {
+    fn summarize<K, F: Iterator<Item = (K, Exts, D, u8)>>(&self, items: F) -> (bool, Exts, Vec<D>) {
         let mut all_exts = Exts::empty();
 
         let mut out_data: Vec<D> = Vec::new();
 
         let mut nobs = 0;
-        for (_, exts, d) in items {
+        for (_, exts, d, _) in items {
             out_data.push(d);
             all_exts = all_exts.add(exts);
             nobs += 1;
@@ -138,22 +138,22 @@ impl<D: Eq + Hash + Send + Sync + Debug + Clone> CountFilterEqClass<D> {
 }
 
 impl<D: Eq + Ord + Hash + Send + Sync + Debug + Clone> KmerSummarizer<D, (EqClassIdType, u8)> for CountFilterEqClass<D> {
-    fn summarize<K, F: Iterator<Item = (K, Exts, D)>>(&self, items: F) -> (bool, Exts, (EqClassIdType, u8)) {
+    fn summarize<K, F: Iterator<Item = (K, Exts, D, u8)>>(&self, items: F) -> (bool, Exts, (EqClassIdType, u8)) {
+        let mut sentinal_data = Vec::new();
         let mut all_exts = Exts::empty();
         let mut out_data = Vec::new();
 
         let mut nobs = 0;
-        let mut sentinal_flag: u8 = 0;
-        for (_, exts, d) in items {
+        for (_, exts, d, sentinal_flag) in items {
+
             out_data.push(d);
+            sentinal_data.push(sentinal_flag);
             all_exts = all_exts.add(exts);
             nobs += 1;
-
-            if exts.num_exts_l() == 0 { sentinal_flag += 1; }
-            if exts.num_exts_r() == 0 { sentinal_flag += 2; }
         }
 
         out_data.sort();  out_data.dedup();
+        sentinal_data.sort(); sentinal_data.dedup();
 
         let eq_id: EqClassIdType = match self.eq_classes.find(&out_data) {
             Some(val) => *val.get(),
@@ -164,7 +164,18 @@ impl<D: Eq + Ord + Hash + Send + Sync + Debug + Clone> KmerSummarizer<D, (EqClas
             },
         };
 
-        (nobs as usize >= self.min_kmer_obs, all_exts, (eq_id, sentinal_flag))
+        let out_sentinal_flag ;
+        assert!(sentinal_data.len() <= 4);
+
+        if sentinal_data.len() == 1 {
+            out_sentinal_flag = Some(sentinal_data[0]);
+        } else if sentinal_data.last() == Some(&3) || (sentinal_data[0] == 1 && sentinal_data[1] == 2) {
+            out_sentinal_flag = Some(3);
+        } else {
+            out_sentinal_flag = Some(sentinal_data[1]);
+        }
+
+        (nobs as usize >= self.min_kmer_obs, all_exts, (eq_id, out_sentinal_flag.unwrap()))
     }
 }
 
@@ -206,7 +217,7 @@ impl<D: Eq + Ord + Hash + Send + Sync + Debug + Clone> KmerSummarizer<D, (EqClas
 /// BoomHashMap2 Object, check rust-boomphf for details
 #[inline(never)]
 pub fn filter_kmers<K: Kmer, V: Vmer, D1: Clone, DS, S: KmerSummarizer<D1, DS>>(
-    seqs: &[(V, Exts, D1)],
+    seqs: &[(V, Exts, D1, u8)],
     summarizer: &dyn Deref<Target=S>,
     stranded: bool,
     report_all_kmers: bool,
@@ -223,7 +234,7 @@ where DS: Debug{
 
     // Estimate memory consumed by Kmer vectors, and set iteration count appropriately
     let input_kmers: usize = seqs.iter()
-        .map(|&(ref vmer, _, _)| vmer.len().saturating_sub(K::k() - 1))
+        .map(|&(ref vmer, _, _, _)| vmer.len().saturating_sub(K::k() - 1))
         .sum();
     let kmer_mem = input_kmers * mem::size_of::<(K, D1)>();
     let max_mem = memory_size * (10 as usize).pow(9);
@@ -251,29 +262,50 @@ where DS: Debug{
     for (i, bucket_range) in bucket_ranges.into_iter().enumerate() {
         debug!("Processing bucket {} of {}", i, n_buckets);
 
-        let mut kmer_buckets: Vec<Vec<(K, Exts, D1)>> = Vec::new();
+        let mut kmer_buckets: Vec<Vec<(K, Exts, D1, u8)>> = Vec::new();
         for _ in 0..256 {
             kmer_buckets.push(Vec::new());
         }
 
-        for &(ref seq, seq_exts, ref d) in seqs {
-            for (kmer, exts) in seq.iter_kmer_exts::<K>(seq_exts) {
-                let (min_kmer, flip_exts) = if rc_norm {
+        for &(ref seq, seq_exts, ref d, sentinel_id) in seqs {
+            //println!("{:?}, {:?}, {:?}", seq, seq_exts, sentinel_id);
+            let num_kmers = seq.len() - K::k() + 1;
+            for (kmer_index, (kmer, exts)) in seq.iter_kmer_exts::<K>(seq_exts).enumerate() {
+                let (min_kmer, flip_exts, flip) = if rc_norm {
                     let (min_kmer, flip) = kmer.min_rc_flip();
                     let flip_exts = if flip { exts.rc() } else { exts };
-                    (min_kmer, flip_exts)
+                    (min_kmer, flip_exts, flip)
                 } else {
-                    (kmer, exts)
+                    (kmer, exts, false)
                 };
                 let bucket = bucket(min_kmer);
 
                 if bucket >= bucket_range.start && bucket < bucket_range.end {
-                    kmer_buckets[bucket].push((min_kmer, flip_exts, d.clone()));
+                    let out_sentinel_id = match sentinel_id {
+                        0 => 0,
+                        1 => match kmer_index {
+                            0 => if flip { 2 } else { 1 },
+                            _ => 0,
+                        },
+                        2 => match kmer_index {
+                            _ if kmer_index == num_kmers - 1 => {
+                                if flip { 1 } else { 2 }
+                            },
+                            _ => 0,
+                        },
+                        3 => {
+                            assert!(num_kmers == 1);
+                            3
+                        }
+                        _ => unreachable!(),
+                    };
+
+                    kmer_buckets[bucket].push((min_kmer, flip_exts, d.clone(), out_sentinel_id));
                 }
             }
         }
 
-       
+
         for mut kmer_vec in kmer_buckets {
 
             kmer_vec.sort_by_key(|elt| elt.0);
