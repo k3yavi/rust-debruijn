@@ -14,7 +14,7 @@ use boomphf::hashmap::BoomHashMap2;
 use crate::graph::{DebruijnGraph, BaseGraph};
 use crate::dna_string::DnaString;
 
-pub const DEBUG: bool = true;
+pub const DEBUG: bool = false;
 
 #[derive(Copy, Clone, Debug)]
 enum ExtMode<K: Kmer> {
@@ -184,7 +184,7 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
         let bases = node.sequence();
         let exts = node.exts();
 
-        if DEBUG {println!("{:?}", exts);}
+        if DEBUG {println!("{:?} {:?}", exts, exts.num_ext_dir(dir));}
         if exts.num_ext_dir(dir) != 1 ||
             (!self.stranded && node.len() == K::k() &&
                 bases.get_kmer::<K>(0).is_palindrome())
@@ -212,11 +212,11 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
             let next_node = self.graph.get_node(next_node_id);
             let next_exts = next_node.exts();
             if DEBUG {println!("{:?}", next_exts);}
-            let next_data = next_node.data().clone();
-            //let next_data = match rc {
-            //    false => ,
-            //    true => self.spec.flip(next_node.data().clone()),
-            //};
+            //let next_data = next_node.data().clone();
+            let next_data = match rc {
+                false => next_node.data().clone(),
+                true => self.spec.flip(next_node.data().clone()),
+            };
 
             let consistent = (next_node.len() == K::k()) ||
                 match (dir, next_side_incoming, rc) {
@@ -318,16 +318,27 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
                     path.push((next_node, next_dir_incoming));
                     self.available_nodes.remove(next_node);
                     current_node = next_node;
-                    current_data = match current_dir {
-                        Dir::Right => self.spec.reduce(
-                            current_data,
-                            self.graph.get_node(next_node).data(),
-                        ),
-                        Dir::Left => self.spec.reduce(
-                            self.graph.get_node(next_node).data().clone(),
-                            &current_data,
-                        ),
-                    };
+
+                    {
+                        let next_data = match next_dir_incoming {
+                            _ if next_dir_incoming == current_dir => {
+                                current_data.clone()
+                            },
+                            _ => self.graph.get_node(next_node).data().clone(),
+                        };
+
+                        current_data = match current_dir {
+                            Dir::Right => self.spec.reduce(
+                                current_data,
+                                &next_data,
+                            ),
+                            Dir::Left => self.spec.reduce(
+                                next_data,
+                                &current_data,
+                            ),
+                        };
+                    }
+
                     current_dir = next_dir_outgoing;
                 }
                 ExtModeNode::Terminal(ext) => {
@@ -706,7 +717,9 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
         let mut dir_hist = Dir::Left;
         if DEBUG { println!("LPATH: {:?} {:?}", seed, path); }
         // Add on the left path
-        for &(next_kmer, dir) in path.iter() {
+        let mut dir_correction = false;
+        let mut last_kmers_idx = path.len() - 1;
+        for (kidx, &(next_kmer, dir)) in path.iter().enumerate() {
             let kmer = match dir {
                 Dir::Left => next_kmer,
                 Dir::Right => next_kmer.rc(),
@@ -722,8 +735,16 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
                     _ if dir == dir_hist => {
                         (*kmer_data).clone()
                     },
-                    _ =>  self.spec.flip((*kmer_data).clone()),
+                    _ =>  {
+                        if kidx != last_kmers_idx { dir_correction = !dir_correction; }
+                        self.spec.flip((*kmer_data).clone())
+                    },
                 };
+
+                if DEBUG {println!("HERE Left {:?} {:?} {:?}{:?} Orig:{:?} {:?} Dir Correction: {:?}",
+                                   seed, node_data, kmer, next_data,
+                                   (*kmer_data).clone(), dir_hist,
+                                   dir_correction);}
 
                 node_data = match dir_hist {
                     Dir::Right => self.spec.reduce(
@@ -735,10 +756,6 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
                         &node_data,
                     ),
                 };
-
-                if DEBUG {println!("HERE Left {:?} {:?} {:?}{:?} Orig:{:?} {:?}",
-                                   seed, node_data, kmer, next_data,
-                                   (*kmer_data).clone(), dir_hist);}
             }
 
             dir_hist = dir;
@@ -750,14 +767,17 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
             Some(&(_, Dir::Right)) => l_ext.complement(),
         };
 
-        let l_node_data = node_data;
+        if DEBUG { println!("Dir Correction Left: {}", dir_correction); }
+        let l_node_data = if dir_correction { self.spec.flip(node_data) } else { node_data };
         node_data = self.get_kmer_data(&seed).1.clone();
-        let r_ext = self.extend_kmer(seed, Dir::Right, node_data.clone(), path);
+        dir_correction = false;
 
+        let r_ext = self.extend_kmer(seed, Dir::Right, node_data.clone(), path);
         dir_hist = Dir::Right;
         if DEBUG {println!("RPATH: {:?} {:?}", seed, path); }
         // Add on the right path
-        for &(next_kmer, dir) in path.iter() {
+        last_kmers_idx = path.len();
+        for (kidx, &(next_kmer, dir)) in path.iter().enumerate() {
             let kmer = match dir {
                 Dir::Left => next_kmer.rc(),
                 Dir::Right => next_kmer,
@@ -772,8 +792,16 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
                     _ if dir == dir_hist => {
                         (*kmer_data).clone()
                     },
-                    _ =>  self.spec.flip((*kmer_data).clone()),
+                    _ =>  {
+                        if kidx != last_kmers_idx { dir_correction = !dir_correction; }
+                        self.spec.flip((*kmer_data).clone())
+                    },
                 };
+
+                if DEBUG {println!("HERE Right {:?} {:?} {:?}{:?} Orig:{:?} {:?} Dir correction {}",
+                                   seed, node_data, kmer, next_data,
+                                   (*kmer_data).clone(), dir_hist,
+                                   dir_correction);}
 
                 node_data = match dir_hist {
                     Dir::Right => self.spec.reduce(
@@ -785,10 +813,6 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
                         &node_data,
                     ),
                 };
-
-                if DEBUG {println!("HERE Right {:?} {:?} {:?}{:?} Orig:{:?} {:?}",
-                                   seed, node_data, kmer, next_data,
-                                   (*kmer_data).clone(), dir_hist);}
             }
 
 
@@ -801,7 +825,11 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
             Some(&(_, Dir::Right)) => r_ext,
         };
 
-        if DEBUG { println!("Found Ldata: {:?}; Rdata: {:?}", l_node_data, node_data); }
+        node_data = if dir_correction { self.spec.flip(node_data) } else { node_data };
+        if DEBUG {
+            println!("Dir Correction Right: {}", dir_correction);
+            println!("Found Ldata: {:?}; Rdata: {:?}", l_node_data, node_data);
+        }
         node_data = self.spec.bidirectional_join_test(l_node_data, &node_data);
         (Exts::from_single_dirs(left_extend, right_extend), node_data)
     }
