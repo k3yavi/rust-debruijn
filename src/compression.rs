@@ -14,7 +14,7 @@ use boomphf::hashmap::BoomHashMap2;
 use crate::graph::{DebruijnGraph, BaseGraph};
 use crate::dna_string::DnaString;
 
-pub const DEBUG: bool = false;
+pub const DEBUG: bool = true;
 
 #[derive(Copy, Clone, Debug)]
 enum ExtMode<K: Kmer> {
