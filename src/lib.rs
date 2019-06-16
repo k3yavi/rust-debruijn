@@ -1,44 +1,34 @@
 // Copyright 2017 10x Genomics
 
-//! # debruijn-rs: a De Bruijn graph for DNA seqeunces in Rust.
-//! This library provides tools for efficiently construction de bruijn graphs
+//! # debruijn: a De Bruijn graph library for DNA seqeunces in Rust.
+//! This library provides tools for efficient construction DeBruijn graphs (dBG)
 //! from DNA sequences, tracking arbitrary metadata associated with kmers in the
 //! graph, and performing path-compression of unbranched graph paths to improve
 //! speed and reduce memory consumption.
-
+//!
+//! Most applications of `debruijn` will follow this general workflow:
+//! 1. You generate a set of sequences to make a dBG from.
+//! 2. You pass those sequences to the `filter_kmers` function, which converts the sequences into kmers, while tracking 'metadata' about each kmer in a very customizable way. The metadata could be read count, a set of colors, a set of read counts split by haplotype, a UMI count, etc.
+//! 3. The the library will convert the kmers to a compressed dBG. You can also customize the rules for how to compress the dBG and how to 'combine' the per-kmer metadata.
+//!
+//! Then you can use the final compressed dBG how you like. There are some methods for simplifying and re-building the  graph, but those could be developed more.
+//!
+//! ## Examples
+//! - [Local phased SV assembly tool in our Long Ranger package](https://github.com/10XGenomics/longranger/blob/master/lib/pvc/src/asm_caller.rs#L205)
+//! - [Single-cell VDJ assember](https://github.com/10XGenomics/cellranger/blob/master/lib/rust/vdj_asm/src/asm.rs#L191)
+//! - [Build a colored, compressed dBG of a transcriptome reference](https://github.com/10XGenomics/rust-pseudoaligner/blob/master/src/build_index.rs#L40)
+//!
 //! All the data structures in debruijn-rs are specialized to the 4 base DNA alphabet,
 //! and use 2-bit packed encoding of base-pairs into integer types, and efficient methods for
 //! reverse complement, enumerating kmers from longer sequences, and transfering data between
 //! sequences.
-//!
-//! # Encodings
-//! Most methods for ingesting sequence data into the library will have a form named 'bytes',
+//! 
+//! ## Encodings
+//! Most methods for ingesting sequence data into the library have a form named 'bytes',
 //! which expects bases encoded as the integers 0,1,2,3, and a separate form names 'ascii',
 //! which expects bases encoded as the ASCII letters A,C,G,T.
 
-extern crate num;
-extern crate extprim;
-extern crate rand;
-extern crate byteorder;
-extern crate boomphf;
-extern crate concurrent_hashmap;
-
-#[macro_use]
-extern crate serde_derive;
-extern crate serde;
-extern crate serde_json;
-extern crate smallvec;
-extern crate bit_set;
-extern crate itertools;
-extern crate pdqsort;
-
-#[macro_use]
-extern crate log;
-
-#[cfg(test)]
-#[macro_use]
-extern crate pretty_assertions;
-
+use serde_derive::{Deserialize, Serialize};
 use std::hash::Hash;
 use std::fmt;
 
@@ -113,13 +103,13 @@ pub fn bits_to_base(c: u8) -> char {
 }
 
 /// The complement of a 2-bit encoded base
-#[inline]
+#[inline(always)]
 pub fn complement(base: u8) -> u8 {
     (!base) & 0x3u8
 }
 
 
-/// Generic trait for interacting with DNA sequences
+/// Trait for interacting with DNA sequences
 pub trait Mer: Sized + fmt::Debug {
     /// Length of DNA sequence
     fn len(&self) -> usize;
@@ -137,12 +127,6 @@ pub trait Mer: Sized + fmt::Debug {
     /// Return a new object containing the reverse complement of the sequence
     fn rc(&self) -> Self;
 
-    /// Add the base `v` to the left side of the sequence, and remove the rightmost base
-    fn extend_left(&self, v: u8) -> Self;
-
-    /// Add the base `v` to the right side of the sequence, and remove the leftmost base
-    fn extend_right(&self, v: u8) -> Self;
-
     /// Iterate over the bases in the sequence
     fn iter<'a>(&'a self) -> MerIter<'a, Self> {
         MerIter {
@@ -150,27 +134,10 @@ pub trait Mer: Sized + fmt::Debug {
             i: 0,
         }
     }
-
-    /// Add the base `v` to the side of sequence given by `dir`, and remove a base at the opposite side
-    fn extend(&self, v: u8, dir: Dir) -> Self {
-        match dir {
-            Dir::Left => self.extend_left(v),
-            Dir::Right => self.extend_right(v),
-        }
-    }
-
-    /// Generate all the extension of this sequence given by `exts` in direction `Dir`
-    fn get_extensions(&self, exts: Exts, dir: Dir) -> Vec<Self> {
-        let ext_bases = exts.get(dir);
-        ext_bases
-            .iter()
-            .map(|b| self.extend(b.clone(), dir))
-            .collect()
-    }
 }
 
 
-/// Iterator over values of a DnaStringoded sequence (values will be unpacked into bytes).
+/// Iterator over bases of a DNA sequence (bases will be unpacked into bytes).
 pub struct MerIter<'a, M: 'a + Mer> {
     sequence: &'a M,
     i: usize,
@@ -206,6 +173,29 @@ pub trait Kmer: Mer + Sized + Copy + PartialEq + PartialOrd + Eq + Ord + Hash {
     // Construct a kmer from the given lexicographic rank of the kmer.
     // If K > 32, the leads bases will be A's.
     fn from_u64(value: u64) -> Self;
+
+    /// Add the base `v` to the left side of the sequence, and remove the rightmost base
+    fn extend_left(&self, v: u8) -> Self;
+
+    /// Add the base `v` to the right side of the sequence, and remove the leftmost base
+    fn extend_right(&self, v: u8) -> Self;
+
+    /// Add the base `v` to the side of sequence given by `dir`, and remove a base at the opposite side
+    fn extend(&self, v: u8, dir: Dir) -> Self {
+        match dir {
+            Dir::Left => self.extend_left(v),
+            Dir::Right => self.extend_right(v),
+        }
+    }
+
+    /// Generate all the extension of this sequence given by `exts` in direction `Dir`
+    fn get_extensions(&self, exts: Exts, dir: Dir) -> Vec<Self> {
+        let ext_bases = exts.get(dir);
+        ext_bases
+            .iter()
+            .map(|b| self.extend(b.clone(), dir))
+            .collect()
+    }
 
     /// Return the minimum of the kmer and it's reverse complement, and a flag indicating if sequence was flipped
     fn min_rc_flip(&self) -> (Self, bool) {
@@ -383,7 +373,7 @@ pub trait Vmer: Mer + PartialEq + Eq {
     }
 
     /// Iterate over the kmers in the sequence
-    fn iter_kmers<K: Kmer>(&self) -> KmerIter<K, Self> {
+    fn iter_kmers<K: Kmer>(&self) -> KmerIter<'_, K, Self> {
 
         let kmer = if self.len() >= K::k() {
             self.first_kmer()
@@ -400,7 +390,7 @@ pub trait Vmer: Mer + PartialEq + Eq {
     }
 
     /// Iterate over the kmers and their extensions, given the extensions of the whole sequence
-    fn iter_kmer_exts<K: Kmer>(&self, seq_exts: Exts) -> KmerExtsIter<K, Self> {
+    fn iter_kmer_exts<K: Kmer>(&self, seq_exts: Exts) -> KmerExtsIter<'_, K, Self> {
         let kmer = if self.len() >= K::k() {
             self.first_kmer()
         } else {
@@ -417,8 +407,8 @@ pub trait Vmer: Mer + PartialEq + Eq {
     }
 }
 
-// Note DnaBytes newtype is required to prevent various
-// Vec methods from being overridden by Mer / Vmer methods.
+/// A newtype wrapper around a `Vec<u8>` with implementations 
+// of the `Mer` and `Vmer` traits.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct DnaBytes(pub Vec<u8>);
 
@@ -449,16 +439,6 @@ impl Mer for DnaBytes {
     fn rc(&self) -> Self {
         unimplemented!();
     }
-
-    /// Add the base `v` to the left side of the sequence, and remove the rightmost base
-    fn extend_left(&self, _v: u8) -> Self {
-        unimplemented!()
-    }
-
-    /// Add the base `v` to the right side of the sequence, and remove the leftmost base
-    fn extend_right(&self, _v: u8) -> Self {
-        unimplemented!();
-    }
 }
 
 impl Vmer for DnaBytes {
@@ -469,8 +449,7 @@ impl Vmer for DnaBytes {
 
     /// Maximum sequence length that can be stored in this type
     fn max_len() -> usize {
-        //usize::MAX_VALUE;
-        99999999999
+        1<<48
     }
 
     /// Efficiently extract a Kmer from the sequence
@@ -480,8 +459,8 @@ impl Vmer for DnaBytes {
 }
 
 
-// Note DnaBytes newtype is required to prevent various
-// Vec methods from being overridden by Mer / Vmer methods.
+/// A newtype wrapper around a `&[u8]` with implementations 
+// of the `Mer` and `Vmer` traits.
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct DnaSlice<'a>(pub &'a [u8]);
 
@@ -512,16 +491,6 @@ impl<'a> Mer for DnaSlice<'a> {
     fn rc(&self) -> Self {
         unimplemented!();
     }
-
-    /// Add the base `v` to the left side of the sequence, and remove the rightmost base
-    fn extend_left(&self, _v: u8) -> Self {
-        unimplemented!()
-    }
-
-    /// Add the base `v` to the right side of the sequence, and remove the leftmost base
-    fn extend_right(&self, _v: u8) -> Self {
-        unimplemented!();
-    }
 }
 
 impl<'a> Vmer for DnaSlice<'a> {
@@ -532,8 +501,7 @@ impl<'a> Vmer for DnaSlice<'a> {
 
     /// Maximum sequence length that can be stored in this type
     fn max_len() -> usize {
-        //usize::MAX_VALUE;
-        99999999999
+        1<<48
     }
 
     /// Efficiently extract a Kmer from the sequence
@@ -545,7 +513,7 @@ impl<'a> Vmer for DnaSlice<'a> {
 
 
 /// Direction of motion in a DeBruijn graph
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum Dir {
     Left,
     Right,
@@ -747,7 +715,7 @@ impl Exts {
 }
 
 impl fmt::Debug for Exts {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = String::new();
 
         for b in self.get(Dir::Left) {

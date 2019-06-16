@@ -17,8 +17,10 @@ use std::cmp::min;
 use std::io::Error;
 use std::hash::Hash;
 use std::f32;
+use serde_derive::{Deserialize, Serialize};
+use log::{debug, trace};
 
-use boomphf::{BoomHashMap, FastIteration, NodeSize};
+use boomphf::hashmap::BoomHashMap;
 
 use serde_json;
 use serde_json::Value;
@@ -26,12 +28,12 @@ use serde_json::Value;
 type SmallVec4<T> = SmallVec<[T; 4]>;
 type SmallVec8<T> = SmallVec<[T; 8]>;
 
-use Mer;
-use Kmer;
-use Vmer;
-use Dir;
-use Exts;
-use dna_string::{DnaString, DnaStringSlice, PackedDnaStringSet};
+use crate::Mer;
+use crate::Kmer;
+use crate::Vmer;
+use crate::Dir;
+use crate::Exts;
+use crate::dna_string::{DnaString, DnaStringSlice, PackedDnaStringSet};
 
 /// A compressed DeBruijn graph carrying auxiliary data on each node of type `D`.
 /// This type does not carry the sorted index arrays the allow the graph
@@ -110,21 +112,54 @@ impl<K: Kmer + Send + Sync, D> BaseGraph<K, D> {
     pub fn finish(self) -> DebruijnGraph<K, D> {
         let indices: Vec<u32> = (0..self.len() as u32).collect();
 
-        let mut left_kmers: Vec<K> = Vec::with_capacity(self.len());
-        let mut right_kmers: Vec<K> = Vec::with_capacity(self.len());
+        let left_order = {
+            let mut kmers: Vec<K> = Vec::with_capacity(self.len());
+            for idx in &indices {
+                kmers.push( self.sequences.get(*idx as usize).first_kmer() );
+            }
+            BoomHashMap::new_parallel(kmers, indices.clone())
+        };
 
-        for idx in &indices {
-            left_kmers.push( self.sequences.get(*idx as usize).first_kmer() );
-        }
-
-        for idx in &indices {
-            right_kmers.push( self.sequences.get(*idx as usize).last_kmer() );
-        }
+        let right_order = {
+            let mut kmers: Vec<K> = Vec::with_capacity(self.len());
+            for idx in &indices {
+                kmers.push( self.sequences.get(*idx as usize).last_kmer() );
+            }
+            BoomHashMap::new_parallel(kmers, indices)
+        };
 
         DebruijnGraph {
             base: self,
-            left_order: BoomHashMap::new_parallel( left_kmers, indices.clone() ),
-            right_order: BoomHashMap::new_parallel( right_kmers, indices ),
+            left_order,
+            right_order,
+        }
+    }
+}
+
+impl<K: Kmer, D> BaseGraph<K, D> {
+    pub fn finish_serial(self) -> DebruijnGraph<K, D> {
+        let indices: Vec<u32> = (0..self.len() as u32).collect();
+
+        let left_order = {
+            let mut kmers: Vec<K> = Vec::with_capacity(self.len());
+            for idx in &indices {
+                kmers.push( self.sequences.get(*idx as usize).first_kmer() );
+            }
+            BoomHashMap::new(kmers, indices.clone())
+        };
+
+        let right_order = {
+            let mut kmers: Vec<K> = Vec::with_capacity(self.len());
+            for idx in &indices {
+                kmers.push( self.sequences.get(*idx as usize).last_kmer() );
+            }
+            BoomHashMap::new(kmers, indices)
+        };
+
+        DebruijnGraph {
+            base: self,
+            left_order,
+            right_order,
         }
     }
 }
@@ -266,13 +301,20 @@ impl<K: Kmer, D: Debug> DebruijnGraph<K, D> {
                     let ret_edges = next.edges(return_dir);
                     if ret_edges.len() == 1 {
 
+                        // Test for us being a palindrome
                         if n.len() == K::k() && n.sequence().first_kmer::<K>().is_palindrome()
                         {
                             return None;
                         }
 
+                        // Test for a neighbor being a palindrome
                         if next.len() == K::k() && next.sequence().first_kmer::<K>().is_palindrome()
                         {
+                            return None;
+                        }
+
+                        // Test for this edge representing a smooth circle (biting it's own tail)
+                        if n.node_id == next_id {
                             return None;
                         }
 
@@ -448,7 +490,7 @@ impl<K: Kmer, D: Debug> DebruijnGraph<K, D> {
     }
 
 
-    fn node_to_dot<F: Fn(&D) -> String>(&self, node: &Node<K, D>, node_label: &F, f: &mut Write) {
+    fn node_to_dot<F: Fn(&D) -> String>(&self, node: &Node<'_, K, D>, node_label: &F, f: &mut dyn Write) {
 
         let label = node_label(node.data());
         writeln!(
@@ -492,10 +534,10 @@ impl<K: Kmer, D: Debug> DebruijnGraph<K, D> {
     }
 
 
-    fn node_to_gfa<F: Fn(&Node<K, D>) -> String>(
+    fn node_to_gfa<F: Fn(&Node<'_, K, D>) -> String>(
         &self,
-        node: &Node<K, D>,
-        w: &mut Write,
+        node: &Node<'_, K, D>,
+        w: &mut dyn Write,
         tag_func: Option<&F>,
     ) -> Result<(), Error> {
 
@@ -521,7 +563,7 @@ impl<K: Kmer, D: Debug> DebruijnGraph<K, D> {
         }
 
         for (target, dir, _) in node.l_edges() {
-            if target > node.node_id as usize {
+            if target >= node.node_id as usize {
                 let to_dir = match dir {
                     Dir::Left => "+",
                     Dir::Right => "-",
@@ -561,24 +603,29 @@ impl<K: Kmer, D: Debug> DebruijnGraph<K, D> {
 
     /// Write the graph to GFA format
     pub fn to_gfa<P: AsRef<Path>>(&self, gfa_out: P) -> Result<(), Error> {
-        let mut wtr = File::create(gfa_out)?;
+        let wtr = File::create(gfa_out)?;
+        self.write_gfa(&mut std::io::BufWriter::new(wtr))
+    }
+
+
+    pub fn write_gfa(&self, wtr: &mut impl Write) -> Result<(), Error> {
         writeln!(wtr, "H\tVN:Z:debruijn-rs")?;
 
         // Hack to generate a None value with the right type.
-        let dummy_func = |_n: &Node<K, D>| "".to_string();
+        let dummy_func = |_n: &Node<'_, K, D>| "".to_string();
         let mut dummy_opt = Some(&dummy_func);
         let _ = dummy_opt.take();
 
         for i in 0..self.len() {
             let n = self.get_node(i);
-            self.node_to_gfa(&n, &mut wtr, dummy_opt)?;
+            self.node_to_gfa(&n, wtr, dummy_opt)?;
         }
 
         Ok(())
     }
 
     /// Write the graph to GFA format
-    pub fn to_gfa_with_tags<P: AsRef<Path>, F: Fn(&Node<K, D>) -> String>(
+    pub fn to_gfa_with_tags<P: AsRef<Path>, F: Fn(&Node<'_, K, D>) -> String>(
         &self,
         gfa_out: P,
         tag_func: F,
@@ -671,7 +718,7 @@ impl<K: Kmer, D: Debug> DebruijnGraph<K, D> {
         }
     }
 
-    pub fn to_supernova_bv(&self, w: &mut Write) -> Result<(), Error> {
+    pub fn to_supernova_bv(&self, w: &mut dyn Write) -> Result<(), Error> {
         use byteorder::{LittleEndian, WriteBytesExt};
 
         w.write(b"BINWRITE")?;   // magic number
@@ -903,12 +950,14 @@ impl<'a, K: Kmer + 'a, D: Debug + 'a> Iterator for NodeIntoIter<'a, K, D> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.node_id < self.graph.len() {
-            let node = self.graph.get_node(self.node_id);
+            let node_id = self.node_id;
+            let node = self.graph.get_node(node_id);
             let node_seq = node.sequence();
 
             self.node_id += 1;
             Some(
                 NodeKmer {
+                    node_id: node_id,
                     node_seq_slice: node_seq,
                     phantom_d: PhantomData,
                     phantom_k: PhantomData,
@@ -920,7 +969,9 @@ impl<'a, K: Kmer + 'a, D: Debug + 'a> Iterator for NodeIntoIter<'a, K, D> {
 }
 
 /// Iterator over nodes in a `DeBruijnGraph`
+#[derive(Clone)]
 pub struct NodeKmer<'a, K: Kmer + 'a, D: Debug + 'a> {
+    pub node_id: usize,
     node_seq_slice: DnaStringSlice<'a>,
     phantom_k: PhantomData<K>,
     phantom_d: PhantomData<D>,
@@ -932,13 +983,6 @@ pub struct NodeKmerIter<'a, K: Kmer + 'a, D: Debug + 'a> {
     node_seq_slice: DnaStringSlice<'a>,
     phantom_k: PhantomData<K>,
     phantom_d: PhantomData<D>,
-}
-
-
-impl<'a, K: Kmer + 'a, D: Debug + 'a> NodeSize for NodeKmer<'a, K, D> {
-    fn num_windows(&self) -> usize {
-        self.node_seq_slice.len() - K::k() + 1
-    }
 }
 
 impl<'a, K: Kmer + 'a, D: Debug + 'a> IntoIterator for NodeKmer<'a, K, D> {
@@ -971,13 +1015,22 @@ impl<'a, K: Kmer + 'a, D: Debug + 'a> Iterator for NodeKmerIter<'a, K, D> {
             Some(kmer)
         }
     }
-}
 
-impl<'a, K: Kmer + 'a, D: Debug + 'a> FastIteration for NodeKmerIter<'a, K, D> {
-    fn skip_next(&mut self) {
-        self.kmer_id += 1;
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        return (self.num_kmers, Some(self.num_kmers))
+    }
+
+    /// Provide a 'fast-forward' capability for this iterator
+    /// MPHF will use this to reduce the number of kmers that 
+    /// need to be produced.
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        self.kmer_id += n;
+        self.next()
     }
 }
+
+/// Marker signifying that NodeKmerIter has a known size. 
+impl<'a, K: Kmer + 'a, D: Debug + 'a> ExactSizeIterator for NodeKmerIter<'a, K, D> {}
 
 /// Unbranched sequence in the DeBruijn graph
 pub struct Node<'a, K: Kmer + 'a, D: 'a> {
@@ -1024,7 +1077,7 @@ impl<'a, K: Kmer, D: Debug> Node<'a, K, D> {
         self.graph.find_edges(self.node_id, dir)
     }
 
-    fn to_json<F: Fn(&D) -> Value>(&self, func: &F, f: &mut Write) {
+    fn to_json<F: Fn(&D) -> Value>(&self, func: &F, f: &mut dyn Write) {
         write!(f,
                "{{\"id\":\"{}\",\"L\":{},\"D\":{},\"Se\":\"{:?}\"}}",
                self.node_id,
@@ -1034,7 +1087,7 @@ impl<'a, K: Kmer, D: Debug> Node<'a, K, D> {
         ).unwrap();
     }
 
-    fn edges_to_json(&self, f: &mut Write) -> bool {
+    fn edges_to_json(&self, f: &mut dyn Write) -> bool {
         let mut wrote = false;
         let edges = self.r_edges();
         for (idx, &(id, incoming_dir, _)) in edges.iter().enumerate() {
@@ -1071,15 +1124,16 @@ impl<'a, K: Kmer, D> fmt::Debug for Node<'a, K, D>
 where
     D: Debug,
 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Node {{ id:{}, Exts: {:?}, L:{:?} R:{:?}, Seq: {:?} }}",
+            "Node {{ id:{}, Exts: {:?}, L:{:?} R:{:?}, Seq: {:?}, Data: {:?} }}",
             self.node_id,
             self.exts(),
             self.l_edges(),
             self.r_edges(),
-            self.sequence().len()
+            self.sequence().len(),
+            self.data()
         )
     }
 }

@@ -39,12 +39,12 @@ use std::hash::Hash;
 use std::fmt;
 use num::PrimInt;
 use num::FromPrimitive;
-use extprim::u128::u128;
 use std::marker::PhantomData;
+use serde_derive::{Deserialize, Serialize};
 
-use Mer;
-use Kmer;
-use bits_to_base;
+use crate::Mer;
+use crate::Kmer;
+use crate::bits_to_base;
 
 
 // Pre-defined kmer types
@@ -62,10 +62,16 @@ pub type Kmer40 = VarIntKmer<u128, K40>;
 pub type Kmer32 = IntKmer<u64>;
 
 /// 30-base kmer, backed by a single u64
+pub type Kmer31 = VarIntKmer<u64, K31>;
+
+/// 30-base kmer, backed by a single u64
 pub type Kmer30 = VarIntKmer<u64, K30>;
 
 /// 24-base kmer, backed by a single u64
 pub type Kmer24 = VarIntKmer<u64, K24>;
+
+/// 20-base kmer, backed by a single u64
+pub type Kmer20 = VarIntKmer<u64, K20>;
 
 /// 16-base kmer, backed by a single u32
 pub type Kmer16 = IntKmer<u32>;
@@ -73,13 +79,16 @@ pub type Kmer16 = IntKmer<u32>;
 /// 14-base kmer, backed by a single u32
 pub type Kmer14 = VarIntKmer<u32, K14>;
 
-/// 16-base kmer, backed by a single u16
+/// 12-base kmer, backed by a single u32
+pub type Kmer12 = VarIntKmer<u32, K12>;
+
+/// 8-base kmer, backed by a single u16
 pub type Kmer8 = IntKmer<u16>;
 
 pub type Kmer6 = VarIntKmer<u16, K6>;
 pub type Kmer5 = VarIntKmer<u16, K5>;
 
-pub type Kmer4 = VarIntKmer<u8, K4>;
+pub type Kmer4 = IntKmer<u8>;
 pub type Kmer3 = VarIntKmer<u8, K3>;
 pub type Kmer2 = VarIntKmer<u8, K2>;
 
@@ -92,10 +101,25 @@ pub trait IntHelp: PrimInt + FromPrimitive {
 impl IntHelp for u128 {
     #[inline]
     fn reverse_by_twos(&self) -> u128 {
-        u128::from_parts(
-            self.low64().reverse_by_twos(),
-            self.high64().reverse_by_twos(),
-        )
+        // swap adjacent pairs
+        let mut r = ((self & 0x33333333333333333333333333333333u128) << 2) | ((self >> 2) & 0x33333333333333333333333333333333u128);
+
+        // swap nibbles
+        r = ((r & 0x0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0Fu128) << 4) | ((r >> 4) & 0x0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0Fu128);
+
+        // swap bytes
+        r = ((r & 0x00FF00FF00FF00FF00FF00FF00FF00FFu128) << 8) | ((r >> 8) & 0x00FF00FF00FF00FF00FF00FF00FF00FFu128);
+
+        // swap 2 bytes
+        r = ((r & 0x0000FFFF0000FFFF0000FFFF0000FFFFu128) << 16) | ((r >> 16) & 0x0000FFFF0000FFFF0000FFFF0000FFFFu128);
+
+        // swap 4 bytes
+        r = ((r & 0x00000000FFFFFFFF00000000FFFFFFFFu128) << 32) | ((r >> 32) & 0x00000000FFFFFFFF00000000FFFFFFFFu128);
+
+        // swap 8 bytes
+        r = ((r & 0x0000000000000000FFFFFFFFFFFFFFFFu128) << 64) | ((r >> 64) & 0x0000000000000000FFFFFFFFFFFFFFFFu128);
+
+        r
     }
 }
 
@@ -201,15 +225,18 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp> IntKmer<T> {
         bitpos
     }
 
+    #[inline(always)]
     fn _k() -> usize {
         // 4 bases per byte
         std::mem::size_of::<T>() * 4
     }
 
+    #[inline(always)]
     fn _bits() -> usize {
         std::mem::size_of::<T>() * 8
     }
 
+    #[inline(always)]
     pub fn top_mask(n_bases: usize) -> T {
         if n_bases > 0 {
             // first pos bases
@@ -220,6 +247,7 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp> IntKmer<T> {
         }
     }
 
+    #[inline(always)]
     pub fn bottom_mask(n_bases: usize) -> T {
         if n_bases > 0 {
             // first pos bases
@@ -233,6 +261,7 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp> IntKmer<T> {
 
 
 impl<T: PrimInt + FromPrimitive + Hash + IntHelp> Mer for IntKmer<T> {
+    #[inline(always)]
     fn len(&self) -> usize {
         Self::_k()
     }
@@ -253,6 +282,7 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp> Mer for IntKmer<T> {
     /// Set a slice of bases in the kmer, using the packed representation in value.
     /// Sets n_bases, starting at pos. Bases must always be packed into the upper-most
     /// bits of the value.
+    #[inline(always)]
     fn set_slice_mut(&mut self, pos: usize, n_bases: usize, value: u64) {
         debug_assert!(pos + n_bases <= Self::k());
 
@@ -285,6 +315,25 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp> Mer for IntKmer<T> {
         // NOTE: IntKmer always fills the bits, so we don't need to shift here.
         IntKmer { storage: new }
     }
+}
+
+impl<T: PrimInt + FromPrimitive + Hash + IntHelp> Kmer for IntKmer<T> {
+    fn empty() -> Self {
+        IntKmer { storage: T::zero() }
+    }
+
+    #[inline(always)]
+    fn k() -> usize {
+        Self::_k()
+    }
+
+    fn from_u64(v: u64) -> IntKmer<T> {
+        IntKmer { storage: Self::t_from_u64(v) }
+    }
+
+    fn to_u64(&self) -> u64 {
+        T::to_u64(&self.storage).unwrap()
+    }
 
     /// Shift the base v into the left end of the kmer
     fn extend_left(&self, v: u8) -> Self {
@@ -300,26 +349,8 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp> Mer for IntKmer<T> {
     }
 }
 
-impl<T: PrimInt + FromPrimitive + Hash + IntHelp> Kmer for IntKmer<T> {
-    fn empty() -> Self {
-        IntKmer { storage: T::zero() }
-    }
-
-    fn k() -> usize {
-        Self::_k()
-    }
-
-    fn from_u64(v: u64) -> IntKmer<T> {
-        IntKmer { storage: Self::t_from_u64(v) }
-    }
-
-    fn to_u64(&self) -> u64 {
-        T::to_u64(&self.storage).unwrap()
-    }
-}
-
 impl<T: PrimInt + FromPrimitive + Hash + IntHelp> fmt::Debug for IntKmer<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = String::new();
         for pos in 0..Self::k() {
             s.push(bits_to_base(self.get(pos)))
@@ -372,10 +403,32 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp, KS: KmerSize> Kmer for VarIntK
     fn from_u64(v: u64) -> Self {
         VarIntKmer { storage: Self::t_from_u64(v), phantom: PhantomData}
     }
+
+    /// Shift the base v into the left end of the kmer
+    fn extend_left(&self, v: u8) -> Self {
+        let new = self.storage >> 2;
+        let mut kmer = VarIntKmer {
+            storage: new,
+            phantom: PhantomData,
+        };
+        kmer.set_mut(0, v);
+        kmer
+    }
+
+    fn extend_right(&self, v: u8) -> Self {
+        let new = self.storage << 2 & !Self::top_mask(0);
+        let mut kmer = VarIntKmer {
+            storage: new,
+            phantom: PhantomData,
+        };
+        kmer.set_mut(Self::k() - 1, v);
+        kmer
+    }
 }
 
 
 impl<T: PrimInt + FromPrimitive + Hash + IntHelp, KS: KmerSize> VarIntKmer<T, KS> {
+    #[inline(always)]
     fn msk() -> T {
         T::one() << 1 | T::one()
     }
@@ -388,10 +441,12 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp, KS: KmerSize> VarIntKmer<T, KS
         T::from_u8(v).unwrap()
     }
 
+
     fn t_from_u64(v: u64) -> T {
         T::from_u64(v).unwrap()
     }
 
+    #[inline(always)]
     fn addr(&self, pos: usize) -> usize {
         let top_base = Self::k() - 1;
         let bitpos = (top_base - pos) * 2;
@@ -399,20 +454,24 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp, KS: KmerSize> VarIntKmer<T, KS
     }
 
     // K of this kmer
+    #[inline(always)]
     fn _k() -> usize {
         KS::K()
     }
 
     // Bits used by this kmer
+    #[inline(always)]
     fn _bits() -> usize {
         Self::_k() * 2
     }
 
+    #[inline(always)]
     fn _total_bits() -> usize {
         std::mem::size_of::<T>() * 8
     }
 
     // mask the unused bits at the top, plus the requested number of bases
+    #[inline(always)]
     pub fn top_mask(n_bases: usize) -> T {
         let unused_bits = Self::_total_bits() - Self::_bits();
         let mask_bits = n_bases * 2 + unused_bits;
@@ -425,6 +484,7 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp, KS: KmerSize> VarIntKmer<T, KS
         }
     }
 
+    #[inline(always)]
     pub fn bottom_mask(n_bases: usize) -> T {
         if n_bases > 0 {
             // first pos bases
@@ -438,6 +498,8 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp, KS: KmerSize> VarIntKmer<T, KS
 
 
 impl<T: PrimInt + FromPrimitive + Hash + IntHelp, KS: KmerSize> Mer for VarIntKmer<T, KS> {
+
+    #[inline(always)]
     fn len(&self) -> usize {
         Self::_k()
     }
@@ -458,6 +520,7 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp, KS: KmerSize> Mer for VarIntKm
     /// Set a slice of bases in the kmer, using the packed representation in value.
     /// Sets n_bases, starting at pos. Incoming bases must always be packed into the upper-most
     /// bits of the value.
+    #[inline(always)]
     fn set_slice_mut(&mut self, pos: usize, n_bases: usize, value: u64) {
         debug_assert!(pos + n_bases <= Self::k());
 
@@ -503,31 +566,10 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp, KS: KmerSize> Mer for VarIntKm
             phantom: PhantomData,
         }
     }
-
-    /// Shift the base v into the left end of the kmer
-    fn extend_left(&self, v: u8) -> Self {
-        let new = self.storage >> 2;
-        let mut kmer = VarIntKmer {
-            storage: new,
-            phantom: PhantomData,
-        };
-        kmer.set_mut(0, v);
-        kmer
-    }
-
-    fn extend_right(&self, v: u8) -> Self {
-        let new = self.storage << 2 & !Self::top_mask(0);
-        let mut kmer = VarIntKmer {
-            storage: new,
-            phantom: PhantomData,
-        };
-        kmer.set_mut(Self::k() - 1, v);
-        kmer
-    }
 }
 
 impl<T: PrimInt + FromPrimitive + Hash + IntHelp, KS: KmerSize> fmt::Debug for VarIntKmer<T, KS> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = String::new();
         for pos in 0..Self::k() {
             s.push(bits_to_base(self.get(pos)))
@@ -542,6 +584,7 @@ impl<T: PrimInt + FromPrimitive + Hash + IntHelp, KS: KmerSize> fmt::Debug for V
 pub struct K48;
 
 impl KmerSize for K48 {
+    #[inline(always)]
     fn K() -> usize {
         48
     }
@@ -552,16 +595,30 @@ impl KmerSize for K48 {
 pub struct K40;
 
 impl KmerSize for K40 {
+    #[inline(always)]
     fn K() -> usize {
         40
     }
 }
 
-/// Marker trait for generating K=40 Kmers
+/// Marker trait for generating K=31 Kmers
+#[derive(Debug, Hash, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub struct K31;
+
+impl KmerSize for K31 {
+    #[inline(always)]
+    fn K() -> usize {
+        31
+    }
+}
+
+
+/// Marker trait for generating K=30 Kmers
 #[derive(Debug, Hash, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct K30;
 
 impl KmerSize for K30 {
+    #[inline(always)]
     fn K() -> usize {
         30
     }
@@ -572,8 +629,20 @@ impl KmerSize for K30 {
 pub struct K24;
 
 impl KmerSize for K24 {
+    #[inline(always)]
     fn K() -> usize {
         24
+    }
+}
+
+/// Marker trait for generating K=20 Kmers
+#[derive(Debug, Hash, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub struct K20;
+
+impl KmerSize for K20 {
+    #[inline(always)]
+    fn K() -> usize {
+        20
     }
 }
 
@@ -582,9 +651,20 @@ impl KmerSize for K24 {
 pub struct K14;
 
 impl KmerSize for K14 {
-    #[inline]
+    #[inline(always)]
     fn K() -> usize {
         14
+    }
+}
+
+/// Marker trait for generating K=12 Kmers
+#[derive(Debug, Hash, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+pub struct K12;
+
+impl KmerSize for K12 {
+    #[inline]
+    fn K() -> usize {
+        12
     }
 }
 
@@ -593,7 +673,7 @@ impl KmerSize for K14 {
 pub struct K6;
 
 impl KmerSize for K6 {
-    #[inline]
+    #[inline(always)]
     fn K() -> usize {
         6
     }
@@ -604,7 +684,7 @@ impl KmerSize for K6 {
 pub struct K5;
 
 impl KmerSize for K5 {
-    #[inline]
+    #[inline(always)]
     fn K() -> usize {
         5
     }
@@ -614,7 +694,7 @@ impl KmerSize for K5 {
 pub struct K4;
 
 impl KmerSize for K4 {
-    #[inline]
+    #[inline(always)]
     fn K() -> usize {
         4
     }
@@ -624,7 +704,7 @@ impl KmerSize for K4 {
 pub struct K3;
 
 impl KmerSize for K3 {
-    #[inline]
+    #[inline(always)]
     fn K() -> usize {
         3
     }
@@ -634,7 +714,7 @@ impl KmerSize for K3 {
 pub struct K2;
 
 impl KmerSize for K2 {
-    #[inline]
+    #[inline(always)]
     fn K() -> usize {
         2
     }
@@ -646,12 +726,10 @@ impl KmerSize for K2 {
 mod tests {
     use super::*;
     use rand::{self, Rng, RngCore};
-    use extprim::u128::u128;
+    use crate::vmer::Lmer;
 
-    use vmer::Lmer;
-
-    use Vmer;
-    use MerImmut;
+    use crate::Vmer;
+    use crate::MerImmut;
 
     // Generate random kmers & test the methods for manipulating them
     fn check_kmer<T: Kmer>() {
@@ -840,6 +918,13 @@ mod tests {
     }
 
     #[test]
+    fn test_lmer_1_kmer_20() {
+        for _ in 0..10000 {
+            check_vmer::<Lmer<[u64; 1]>, VarIntKmer<u64, K20>>();
+        }
+    }
+
+    #[test]
     fn test_lmer_1_kmer_16() {
         for _ in 0..10000 {
             check_vmer::<Lmer<[u64; 1]>, IntKmer<u32>>();
@@ -868,9 +953,23 @@ mod tests {
     }
 
     #[test]
+    fn test_kmer_31() {
+        for _ in 0..10000 {
+            check_kmer::<VarIntKmer<u64, K31>>();
+        }
+    }
+
+    #[test]
     fn test_kmer_24() {
         for _ in 0..10000 {
             check_kmer::<VarIntKmer<u64, K24>>();
+        }
+    }
+
+    #[test]
+    fn test_kmer_20() {
+        for _ in 0..10000 {
+            check_kmer::<VarIntKmer<u64, K20>>();
         }
     }
 
@@ -889,6 +988,13 @@ mod tests {
     }
 
     #[test]
+    fn test_kmer_12() {
+        for _ in 0..10000 {
+            check_kmer::<VarIntKmer<u32, K12>>();
+        }
+    }
+
+    #[test]
     fn test_kmer_8() {
         for _ in 0..10000 {
             check_kmer::<IntKmer<u16>>();
@@ -902,10 +1008,17 @@ mod tests {
         }
     }
 
-        #[test]
+    #[test]
     fn test_kmer_5() {
         for _ in 0..10000 {
             check_kmer::<Kmer5>();
+        }
+    }
+
+    #[test]
+    fn test_kmer_4() {
+        for _ in 0..10000 {
+            check_kmer::<Kmer4>();
         }
     }
 }
