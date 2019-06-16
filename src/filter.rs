@@ -294,7 +294,12 @@ where DS: Debug{
                             _ => 0,
                         },
                         3 => {
-                            3
+                            if num_kmers == 1 { 3 }
+                            else if kmer_index == num_kmers - 1 {
+                                if flip { 1 } else { 2 }
+                            } else if kmer_index == 0 {
+                                if flip { 2 } else { 1 }
+                            } else { 0 }
                         }
                         _ => unreachable!(),
                     };
