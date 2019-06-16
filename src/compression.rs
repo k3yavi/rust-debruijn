@@ -116,16 +116,16 @@ impl CompressionSpec<(u32, u8)> for ScmapCompress<(u32, u8)>
                 _ => unreachable!(),
             },
             1 => match other_d_1 {
-                0 => return d,
+                0 | 1 => return d,
                 //1 => return *other,
                 2 => return (d.0, 3),
                 _ => unreachable!("{:?}", other_d_1),
             },
-            //2 => match other_d_1 {
+            2 => match other_d_1 {
                 //0 => return d,
-                //2 => return *other,
-                //_ => return (d.0, 3),
-            //}
+                2 => return d,
+                _ => unreachable!(),
+            }
             //3 => match other_d_1 {
             //    0 => return d,
             //    _ => unreachable!(),
@@ -145,11 +145,16 @@ impl CompressionSpec<(u32, u8)> for ScmapCompress<(u32, u8)>
     }
 
     fn bidirectional_join_test(&self, l_data: (u32, u8), r_data: &(u32, u8)) -> (u32, u8) {
+        assert!(l_data.0 == r_data.0);
         match (l_data.1, r_data.1) {
             (0, 0) | (1, 1) | (2, 2) | (3, 3) => l_data,
             (0, 1) | (0, 2) | (0, 3) | (1, 3) | (2, 3) => r_data.clone(),
-            (1, 0) | (2, 0) | (3, 0) => l_data,
-            _ => unreachable!(),
+            (1, 0) | (2, 0) | (3, 0) | (3, 2) => l_data,
+            (1, 2) => (l_data.0, 3),
+            _ => {
+                println!("{:?}, {:?}", l_data, r_data);
+                unreachable!()
+            },
         }
     }
 
@@ -776,7 +781,7 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
         dir_hist = Dir::Right;
         if DEBUG {println!("RPATH: {:?} {:?}", seed, path); }
         // Add on the right path
-        last_kmers_idx = path.len();
+        last_kmers_idx = path.len() - 1;
         for (kidx, &(next_kmer, dir)) in path.iter().enumerate() {
             let kmer = match dir {
                 Dir::Left => next_kmer.rc(),

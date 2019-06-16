@@ -294,7 +294,6 @@ where DS: Debug{
                             _ => 0,
                         },
                         3 => {
-                            assert!(num_kmers == 1);
                             3
                         }
                         _ => unreachable!(),
