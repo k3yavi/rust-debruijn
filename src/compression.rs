@@ -609,8 +609,8 @@ impl<'a, K: Kmer, D: Clone + Debug + PartialEq, S: CompressionSpec<D>> CompressF
 
                 // This kmer isn't in this partition, or we've already used it
                 _ => {
-                    if DEBUG { println!("No kmer extention in this shard for{:?}",
-                                        next_kmer); }
+                    if DEBUG { println!("No kmer extention in this shard for {:?}",
+                                        kmer); }
                     return ExtMode::Terminal(exts.single_dir(dir))
                 }
             }
