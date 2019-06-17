@@ -14,7 +14,7 @@ use boomphf::hashmap::BoomHashMap2;
 use crate::graph::{DebruijnGraph, BaseGraph};
 use crate::dna_string::DnaString;
 
-pub const DEBUG: bool = true;
+pub const DEBUG: bool = false;
 
 #[derive(Copy, Clone, Debug)]
 enum ExtMode<K: Kmer> {
@@ -113,7 +113,7 @@ impl CompressionSpec<(u32, u8)> for ScmapCompress<(u32, u8)>
         match d.1 {
             0 => match other_d_1 {
                 0 | 2 => return *other,
-                _ => unreachable!(),
+                _ => unreachable!("{:?}", other_d_1),
             },
             1 => match other_d_1 {
                 0 | 1 => return d,
@@ -326,11 +326,15 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
 
                     {
                         let next_data = self.graph.get_node(next_node).data().clone();
-                        if next_dir_incoming != current_dir {
+                        if next_dir_outgoing != current_dir {
                             current_data = self.spec.flip(current_data);
                         }
 
-                        current_data = match next_dir_incoming {
+                        if DEBUG  {
+                            println!("{:?} {:?} {:?}", current_data,
+                                     next_dir_outgoing, current_dir);
+                        }
+                        current_data = match next_dir_outgoing {
                             Dir::Right => self.spec.reduce(
                                 current_data,
                                 &next_data,
@@ -375,16 +379,24 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
         if DEBUG {println!("LPATH: {:?}", l_path);}
         let mut dir_hist = Dir::Left;
         // Add on the left path
+
+        let mut flip_counter = 0;
         for &(next_node, incoming_dir) in l_path.iter() {
-            node_path.push_front((next_node, incoming_dir.flip()));
+
+            if DEBUG {println!("Iterating: {:?} -> {:?} Node: {:?}",
+                               dir_hist, incoming_dir, next_node);}
+
+            let dir = incoming_dir.flip();
+            node_path.push_front((next_node, dir));
 
             {
                 let next_data = self.graph.get_node(next_node).data().clone();
-                if incoming_dir != dir_hist {
+                if dir != dir_hist {
                     node_data = self.spec.flip(node_data);
+                    flip_counter += 1;
                 }
 
-                node_data = match incoming_dir {
+                node_data = match dir {
                     Dir::Right => self.spec.reduce(
                         node_data,
                         &next_data,
@@ -397,25 +409,31 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
             }
 
 
-            dir_hist = incoming_dir.flip();
+            dir_hist = dir;
         }
 
         if DEBUG {println!("RPATH: {:?}", r_path)};
         dir_hist = Dir::Right;
+
+        let l_node_data = if flip_counter % 2 != 0 { self.spec.flip( node_data ) } else {node_data};
         node_data = self.graph.get_node(seed_node).data().clone();
         // Add on the right path
+
+        flip_counter = 0;
         for &(next_node, incoming_dir) in r_path.iter() {
 
             //println!("{:?}", self.graph.get_node(next_node));
+            let dir = incoming_dir.flip();
             node_path.push_back((next_node, incoming_dir));
 
             {
                 let next_data = self.graph.get_node(next_node).data().clone();
-                if incoming_dir != dir_hist {
+                if dir != dir_hist {
                     node_data = self.spec.flip(node_data);
+                    flip_counter += 1;
                 }
 
-                node_data = match incoming_dir {
+                node_data = match dir {
                     Dir::Right => self.spec.reduce(
                         node_data,
                         &next_data,
@@ -427,7 +445,7 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
                 };
             }
 
-            dir_hist = incoming_dir.flip();
+            dir_hist = dir;
         }
 
         let left_extend = match l_path.last() {
@@ -444,6 +462,12 @@ where K: Kmer + Send + Sync, D: Debug + Clone + PartialEq, S: CompressionSpec<D>
 
         let path_seq = self.graph.sequence_of_path(node_path.iter());
 
+        if DEBUG {
+            println!("Found Ldata: {:?}; Rdata: {:?}", l_node_data, node_data);
+        }
+
+        node_data = if flip_counter % 2 != 0 { self.spec.flip( node_data ) } else {node_data};
+        node_data = self.spec.bidirectional_join_test(l_node_data, &node_data);
         // return sequence and extensions
         (
             path_seq,
